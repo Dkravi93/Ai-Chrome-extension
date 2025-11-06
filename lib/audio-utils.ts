@@ -3,6 +3,7 @@ export class AudioUtils {
     const supportedFormats = [
       'audio/wav',
       'audio/webm',
+      'audio/webm;codecs=opus',
       'audio/mpeg',
       'audio/mp4',
       'audio/ogg'
