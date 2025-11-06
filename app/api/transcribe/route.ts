@@ -1,137 +1,70 @@
-import { NextResponse } from 'next/server';
-import { GroqHandler } from '../../../lib/groq-handler';
+// app/api/transcribe/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { groqHandler } from '@/lib/groq-handler';
 
-const groqHandler = new GroqHandler();
-
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
-    console.log('🔍 TRANSCRIBE ENDPOINT: Received request');
+    console.log('🔍 TRANSCRIBE API: Received request');
     
-    const contentType = request.headers.get('content-type') || '';
-    console.log('📝 Content-Type:', contentType);
+    const formData = await request.formData();
+    const audioFile = formData.get('audio') as File;
+    const model = formData.get('model') as string || 'whisper-large-v3-turbo';
+    const language = formData.get('language') as string || 'en';
+    const temperature = formData.get('temperature') as string || '0.0';
 
-    let audioBuffer: Buffer;
-    let mimeType: string;
-
-    // Check if it's FormData (file upload)
-    if (contentType.includes('multipart/form-data')) {
-      console.log('📁 FormData upload detected');
-      const formData = await request.formData();
-      const audioFile = formData.get('audio') as File;
-      
-      if (!audioFile) {
-        const response = NextResponse.json(
-          { 
-            error: 'No audio file provided in FormData',
-            instructions: 'Send FormData with "audio" file'
-          },
-          { status: 400 }
-        );
-        response.headers.set('Access-Control-Allow-Origin', '*');
-        return response;
-      }
-      
-      const bytes = await audioFile.arrayBuffer();
-      audioBuffer = Buffer.from(bytes);
-      mimeType = audioFile.type || 'audio/webm';
-    } 
-    // Check if it's JSON with base64 audio
-    else if (contentType.includes('application/json')) {
-      console.log('📄 JSON base64 audio detected');
-      const body = await request.json();
-      console.log('📦 Request body keys:', Object.keys(body));
-      
-      if (!body.audio) {
-        const response = NextResponse.json(
-          { 
-            error: 'No audio data provided',
-            instructions: 'Send either FormData with "audio" file or JSON with "audio" (base64) and "mimeType"'
-          },
-          { status: 400 }
-        );
-        response.headers.set('Access-Control-Allow-Origin', '*');
-        return response;
-      }
-      
-      audioBuffer = Buffer.from(body.audio, 'base64');
-      mimeType = body.mimeType || 'audio/webm';
-    }
-    // No supported content type
-    else {
-      const response = NextResponse.json(
-        { 
-          error: 'Unsupported content type',
-          instructions: 'Send either FormData with "audio" file or JSON with "audio" (base64) and "mimeType"'
-        },
-        { status: 400 }
-      );
-      response.headers.set('Access-Control-Allow-Origin', '*');
-      return response;
+    if (!audioFile) {
+      return NextResponse.json({ 
+        error: 'No audio file provided' 
+      }, { status: 400 });
     }
 
-    // Get options from request body
-    let options = {};
-    if (contentType.includes('application/json')) {
-      options = await request.json();
-    } else {
-      const formData = await request.formData();
-      options = {
-        model: formData.get('model'),
-        language: formData.get('language'),
-        temperature: formData.get('temperature')
-      };
-    }
-
-    const { model = 'whisper-large-v3-turbo', language = 'en', temperature = 0.0 } = options as any;
-    
-    console.log('🎵 Processing audio:', {
-      size: audioBuffer.length,
-      mimeType: mimeType,
-      model: model
+    console.log('🎵 TRANSCRIBE API: Processing audio file:', {
+      name: audioFile.name,
+      type: audioFile.type,
+      size: audioFile.size
     });
-    
+
+    // Convert File to Buffer
+    const arrayBuffer = await audioFile.arrayBuffer();
+    const audioBuffer = Buffer.from(arrayBuffer);
+
     const transcription = await groqHandler.transcribeAudio(
       audioBuffer,
-      mimeType,
+      audioFile.type,
       {
         model,
         language,
-        temperature: parseFloat(temperature as string)
+        temperature: parseFloat(temperature)
       }
     );
+
+    console.log('✅ TRANSCRIBE API: Transcription successful');
     
-    console.log('✅ TRANSCRIBE ENDPOINT: Transcription successful');
-    
-    const response = NextResponse.json({ 
+    return NextResponse.json({ 
       transcription,
       success: true,
       model,
       language
     });
-    
-    response.headers.set('Access-Control-Allow-Origin', '*');
-    return response;
   } catch (error: any) {
-    console.error('❌ TRANSCRIBE ENDPOINT: Error:', error);
+    console.error('❌ TRANSCRIBE API: Error:', error);
     
-    const response = NextResponse.json(
-      { 
-        error: 'Transcription failed',
-        message: error.message,
-        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-      },
-      { status: 500 }
-    );
-    
-    response.headers.set('Access-Control-Allow-Origin', '*');
-    return response;
+    return NextResponse.json({ 
+      error: 'Transcription failed',
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    }, { status: 500 });
   }
 }
 
+// Handle OPTIONS for CORS
 export async function OPTIONS() {
-  const response = new NextResponse(null, { status: 200 });
-  response.headers.set('Access-Control-Allow-Origin', '*');
-  response.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  response.headers.set('Access-Control-Allow-Headers', 'Content-Type');
-  return response;
+  return new NextResponse(null, {
+    status: 200,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    },
+  });
 }

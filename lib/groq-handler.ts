@@ -1,18 +1,18 @@
+// lib/groq-handler.ts
 import Groq from 'groq-sdk';
 import { AudioUtils } from './audio-utils';
-import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import path from 'path';
 
 interface ProcessRequest {
   action?: string;
   feature: string;
-  query: string;
-  pageInfo?: {
-    title?: string;
-    url?: string;
-    selectedText?: string;
-  };
+  featurePrompt?: string;
+  conversationHistory?: any[];
+  query?: string;
+  userQuery?: string;
+  pageInfo?: any;
   model?: string;
 }
 
@@ -37,136 +37,285 @@ export class GroqHandler {
   }
 
   async processRequest(request: ProcessRequest) {
-    const { feature, query, pageInfo, model } = request;
-    
-    const prompt = this.buildPrompt(feature, query, pageInfo);
-    
+    const {
+      action,
+      feature,
+      featurePrompt,
+      conversationHistory,
+      query,
+      userQuery,
+      pageInfo,
+      model,
+    } = request;
+
+    // Use userQuery if available, otherwise fall back to query
+    const finalQuery = userQuery || query;
+
+    console.log('🔧 GROQ HANDLER: Processing request with full context', {
+      feature: feature,
+      query: finalQuery,
+      hasConversationHistory: conversationHistory?.length > 0,
+      historyLength: conversationHistory?.length,
+      hasPageInfo: !!pageInfo,
+      model: model,
+    });
+
+    // Build enhanced prompt with all available context
+    const messages = this.buildEnhancedMessages(
+      feature,
+      finalQuery,
+      pageInfo,
+      conversationHistory,
+      featurePrompt
+    );
+
     try {
       const completion = await this.client.chat.completions.create({
-        messages: [
-          { 
-            role: 'system', 
-            content: 'You are a helpful AI assistant that helps with web browsing tasks. Provide clear, concise, and accurate responses. Also, ensure to follow any specific instructions given by the user.'
-          },
-          { 
-            role: 'user', 
-            content: prompt 
-          }
-        ],
+        messages: messages,
         model: model || this.defaultModel,
-        temperature: 0.7,
-        max_tokens: 2048,
+        temperature: this.getTemperatureForFeature(feature),
+        max_tokens: this.getMaxTokensForFeature(feature),
         top_p: 1,
       });
-      
+
       if (!completion.choices?.[0]?.message?.content) {
         throw new Error('No response content received from Groq API');
       }
-      
-      return { 
+
+      console.log('✅ GROQ HANDLER: Response generated with enhanced context', {
+        responseLength: completion.choices[0].message.content.length,
+        model: completion.model,
+        tokensUsed: completion.usage?.total_tokens,
+      });
+
+      return {
         response: completion.choices[0].message.content,
         model: completion.model,
-        usage: completion.usage
+        usage: completion.usage,
       };
-    } catch (error : unknown) {
-      throw new Error(`Groq AI error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } catch (error: any) {
+      console.error('❌ GROQ HANDLER: Error:', error);
+      throw new Error(`Groq AI error: ${error.message}`);
     }
   }
 
-  private buildPrompt(feature: string, query: string, pageInfo?: unknown): string {
-    const basePrompt = `You are an AI assistant helping with web browsing tasks.`;
+  private buildEnhancedMessages(
+    feature: string,
+    query: string = '',
+    pageInfo?: any,
+    conversationHistory: any[] = [],
+    featurePrompt?: string
+  ) {
+    const messages = [];
     const currentDate = new Date().toLocaleDateString('en-US', {
       year: 'numeric',
       month: 'long',
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
-      timeZoneName: 'short'
+      timeZoneName: 'short',
     });
-    //@ts-expect-error - pageInfo typing
-    const context = [`Current date and time: ${currentDate}`, pageInfo?.title && `Current page title: ${pageInfo.title}`, pageInfo?.url && `Current page URL: ${pageInfo.url}`, pageInfo?.selectedText && `Selected text: "${pageInfo.selectedText}"`].filter(Boolean).join('\n');
-    
-    let taskDescription = query;
-    //@ts-expect-error - pageInfo typing
-    if (pageInfo?.selectedText) {
-      //@ts-expect-error - pageInfo typing
-        const selectedContent = pageInfo.selectedText;
-        
-        switch (feature) {
-          case 'explain':
-            taskDescription = `Explain the following **selected text** in simple, easy-to-understand terms. Break down complex concepts and provide analogies.
 
-            Selected Content: "${selectedContent}"
+    // 1. SYSTEM PROMPT with feature-specific instructions
+    const systemPrompt = this.buildSystemPrompt(
+      feature,
+      featurePrompt,
+      pageInfo,
+      currentDate
+    );
+    messages.push({ role: 'system', content: systemPrompt });
 
-            User's specific request/query: ${query || 'General explanation.'}`;
-            break;
-          case 'summarize':
-          case 'extract':
-            taskDescription = `Perform the **${feature}** action specifically on the following **selected text**. If a user query is provided, use it to guide the output.
+    // 2. CONVERSATION HISTORY (maintains context across interactions)
+    if (conversationHistory && conversationHistory.length > 0) {
+      console.log(
+        '📚 Including conversation history:',
+        conversationHistory.length,
+        'messages'
+      );
 
-            Selected Content: "${selectedContent}"
-
-            User's specific request/query: ${query || `General ${feature} request on selected content.`}`;
-            break;
-          default:
-            taskDescription = `${query || 'General request'}. Context for your task is the following selected text: "${selectedContent}"`;
+      conversationHistory.forEach((msg) => {
+        if (msg.content && msg.content.trim()) {
+          messages.push({
+            role: msg.type === 'user' ? 'user' : 'assistant',
+            content: msg.content,
+          });
         }
-    } else {
-      const featurePrompts: { [key: string]: string } = {
-        search: `Perform a web search for: ${query}. Provide a comprehensive answer with relevant details.`,
-        explain: `Explain the following in detail: ${query}. Break down complex concepts and provide examples. (Based on full page content)`,
-        ask: `Answer this question about the current page: ${query}`,
-        summarize: `Provide a clear and concise summary of the current page. Focus on key points and main ideas.`,
-        extract: `Extract and organize the key information from the current page. Present it in a structured format.`,
-        reply: `Compose a professional and appropriate reply to: ${query}`
-      };
-      taskDescription = featurePrompts[feature] || query;
+      });
     }
+
+    // 3. CURRENT QUERY with rich context
+    const userMessage = this.buildUserMessage(
+      feature,
+      query,
+      pageInfo,
+      currentDate
+    );
+    messages.push({ role: 'user', content: userMessage });
+
+    console.log('💬 Final message structure:', {
+      totalMessages: messages.length,
+      systemPromptLength: systemPrompt.length,
+      userMessageLength: userMessage.length,
+      hasHistory: conversationHistory?.length > 0,
+    });
+
+    return messages;
+  }
+
+  private buildSystemPrompt(feature: string, featurePrompt?: string, pageInfo?: any, currentDate?: string) {
+    const baseInstructions = [
+      'You are a helpful AI assistant that helps with web browsing tasks.',
+      `Current date and time: ${currentDate}`,
+      'Provide clear, concise, and accurate responses.',
+      'Use markdown formatting when appropriate for better readability.',
+      'Be honest about the limitations of your knowledge.',
+      'If you need more context, ask clarifying questions.',
+    ];
+
+    const featureSpecificInstructions: { [key: string]: string } = {
+      search: 'Provide comprehensive, well-researched answers. Include relevant details and sources when possible.',
+      explain: 'Break down complex concepts into simple, easy-to-understand terms. Use analogies and examples.',
+      summarize: 'Focus on key points and main ideas. Be concise but comprehensive.',
+      extract: 'Organize information in a structured format. Use tables, lists, or bullet points when helpful.',
+      analyze: 'Provide critical analysis with balanced perspectives. Support your analysis with evidence.',
+      reply: 'Craft professional, context-appropriate responses. Match the tone to the situation.',
+      ask: 'Answer questions accurately based on the provided context. Cite specific parts of the content when relevant.',
+      stt: 'Process spoken input naturally and contextually.',
+    };
+
+    const instructions = [
+      ...baseInstructions,
+      featureSpecificInstructions[feature] || featurePrompt,
+      pageInfo?.title && `Current page: ${pageInfo.title}`,
+      pageInfo?.contentType && `Content type: ${pageInfo.contentType}`,
+    ].filter(Boolean);
+
+    return instructions.join('\n');
+  }
+
+  private buildUserMessage(feature: string, query: string, pageInfo?: any, currentDate?: string) {
+    const contextParts = [];
     
-    return [
-        basePrompt,
-        '\n## Context:',
-        context, 
-        '\n## Task:',
-        taskDescription,
-        '\n## Response Requirements:',
-        '- Be clear and concise',
-        '- Use markdown formatting when appropriate',
-        '- Include relevant details and examples',
-        '- If citing information, indicate the source',
-        '- If the request is unclear or ambiguous, ask for clarification',
-        '- If you cannot provide a complete answer, explain why and suggest next steps'
-    ].filter(Boolean).join('\n');
+    console.log('📋 GROQ HANDLER: Building user message with pageInfo:', {
+      hasPageInfo: !!pageInfo,
+      title: pageInfo?.title,
+      hasSelectedText: !!pageInfo?.selectedText,
+      hasMainText: !!pageInfo?.mainText,
+    });
+
+    // Page context
+    if (pageInfo) {
+      contextParts.push(
+        pageInfo.title && `Page Title: ${pageInfo.title}`,
+        pageInfo.url && `Page URL: ${pageInfo.url}`,
+        pageInfo.contentType && `Content Type: ${pageInfo.contentType}`,
+        pageInfo.wordCount && `Content Length: ${pageInfo.wordCount} words`
+      );
+    }
+
+    // Selected text (high priority)
+    if (pageInfo?.selectedText) {
+      const truncatedSelectedText = pageInfo.selectedText.substring(0, 2000);
+      contextParts.push(`SELECTED TEXT:\n"${truncatedSelectedText}"`);
+    }
+
+    // Main content (truncated for token limits)
+    if (pageInfo?.mainText) {
+      const truncatedContent = pageInfo.mainText.substring(0, 6000);
+      contextParts.push(`PAGE CONTENT:\n${truncatedContent}`);
+    }
+
+    const context = contextParts.filter(Boolean).join('\n\n');
+
+    // Feature-specific task framing
+    const taskFraming: { [key: string]: string } = {
+      search: `Search and provide information about: ${query}`,
+      explain: `Explain: ${query}`,
+      summarize: `Summarize the content${query ? ` focusing on: ${query}` : ''}`,
+      extract: `Extract key information${query ? ` related to: ${query}` : ''}`,
+      analyze: `Analyze: ${query}`,
+      reply: `Compose a reply: ${query}`,
+      ask: `Answer: ${query}`,
+      stt: `Process spoken input: ${query}`,
+    };
+
+    const task = taskFraming[feature] || query;
+
+    return [context && `CONTEXT:\n${context}`, `TASK: ${task}`]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  private getTemperatureForFeature(feature: string): number {
+    const temperatures: { [key: string]: number } = {
+      search: 0.7,
+      explain: 0.3,
+      summarize: 0.2,
+      extract: 0.1,
+      analyze: 0.5,
+      reply: 0.6,
+      ask: 0.3,
+      stt: 0.4,
+    };
+    return temperatures[feature] || 0.7;
+  }
+
+  private getMaxTokensForFeature(feature: string): number {
+    const tokenLimits: { [key: string]: number } = {
+      summarize: 1024,
+      extract: 1024,
+      reply: 512,
+      explain: 2048,
+      analyze: 2048,
+      search: 2048,
+      ask: 2048,
+      stt: 1024,
+    };
+    return tokenLimits[feature] || 2048;
   }
 
   async transcribeAudio(audioBuffer: Buffer, mimeType: string, options: TranscriptionOptions = {}) {
     try {
+      // Validate audio format
       if (!AudioUtils.validateAudioFormat(mimeType)) {
         throw new Error(`Unsupported audio format: ${mimeType}`);
       }
 
-      const tempFilePath = path.join(os.tmpdir(), `audio-${Date.now()}.${this.getFfmpegFormat(mimeType)}`);
+      const tempFilePath = path.join(
+        os.tmpdir(),
+        `audio-${Date.now()}.${this.getFfmpegFormat(mimeType)}`
+      );
+      
       console.log('Temporary file path for transcription:', tempFilePath);
       
       try {
         fs.writeFileSync(tempFilePath, audioBuffer);
-        //@ts-expect-error - groq-sdk typing
-        const transcription = await this.client.audio.transcriptions.create({ file: fs.createReadStream(tempFilePath) as unknown, model: options.model || "whisper-large-v3-turbo", prompt: options.prompt || "", response_format: options.response_format || "json", language: options.language || "en", temperature: options.temperature || 0.0
+
+        const transcription = await this.client.audio.transcriptions.create({
+          file: fs.createReadStream(tempFilePath),
+          model: options.model || 'whisper-large-v3-turbo',
+          prompt: options.prompt || '',
+          response_format: options.response_format || 'json',
+          language: options.language || 'en',
+          temperature: options.temperature || 0.0,
+        });
+
+        console.log('Transcription completed:', {
+          text: transcription.text,
+          duration: transcription.duration,
+          language: transcription.language,
         });
 
         fs.unlinkSync(tempFilePath);
         return transcription.text;
-
-      } catch (fileError) {
+      } catch (fileError: any) {
         if (fs.existsSync(tempFilePath)) {
           fs.unlinkSync(tempFilePath);
         }
         throw fileError;
       }
-
-    } catch (error) {
+    } catch (error: any) {
       console.error('Groq transcription error:', error);
-      //@ts-expect-error - error typing
       throw new Error(`Transcription failed: ${error.message}`);
     }
   }
@@ -177,13 +326,12 @@ export class GroqHandler {
       'audio/mpeg': 'mp3',
       'audio/mp4': 'mp4',
       'audio/ogg': 'ogg',
-      'audio/wav': 'wav'
+      'audio/wav': 'wav',
     };
-    
+
     return formatMap[mimeType] || 'wav';
   }
-
-  getDemoResponse(feature: string, query: string): string {
-    return `I'm sorry, I encountered an issue processing your request. Please check your API key and try again. (Feature: ${feature}, Query: ${query})`;
-  }
 }
+
+// Export a singleton instance
+export const groqHandler = new GroqHandler();

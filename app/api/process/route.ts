@@ -1,65 +1,85 @@
-import { NextResponse } from 'next/server';
-import { GroqHandler } from '../../../lib/groq-handler';
+// app/api/process/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { groqHandler } from '@/lib/groq-handler';
 
-const groqHandler = new GroqHandler();
-
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
-    console.log('🔍 PROCESS ENDPOINT: Received request');
+    console.log('🔍 PROCESS API: Received request');
     
     const body = await request.json();
-    const { action, feature, query, pageInfo } = body;
     
-    if (!feature || !query) {
-      const response = NextResponse.json(
-        { 
-          error: 'Missing required fields',
-          required: ['feature', 'query']
-        },
-        { status: 400 }
-      );
-      response.headers.set('Access-Control-Allow-Origin', '*');
-      return response;
+    console.log('📦 PROCESS API: Request body:', JSON.stringify(body, null, 2));
+
+    const { 
+      action, 
+      feature, 
+      featurePrompt, 
+      conversationHistory, 
+      userQuery,
+      query,
+      pageInfo,
+      pageContext,
+      selectedText,
+      model
+    } = body;
+
+    // Use userQuery if available, otherwise fall back to query
+    const finalQuery = userQuery || query;
+
+    if (!feature || !finalQuery) {
+      return NextResponse.json({ 
+        error: 'Missing required fields',
+        received: { feature, userQuery, query: finalQuery },
+        required: ['feature', 'userQuery or query']
+      }, { status: 400 });
     }
-    
+
+    // Merge pageContext into pageInfo
+    const enhancedPageInfo = {
+      ...pageInfo,
+      ...pageContext,
+      selectedText: selectedText || pageInfo?.selectedText
+    };
+
+    console.log('📋 PROCESS API: Enhanced page info:', {
+      title: enhancedPageInfo?.title,
+      url: enhancedPageInfo?.url,
+      hasSelectedText: !!enhancedPageInfo?.selectedText,
+      hasMainText: !!enhancedPageInfo?.mainText
+    });
+
     const result = await groqHandler.processRequest({
       action,
       feature,
-      query,
-      pageInfo
+      featurePrompt,
+      conversationHistory,
+      query: finalQuery,
+      pageInfo: enhancedPageInfo,
+      model: model || 'openai/gpt-oss-120b'
     });
 
-    console.log('✅ PROCESS ENDPOINT: Success');
+    console.log('✅ PROCESS API: Success');
     
-    const response = NextResponse.json(result);
-    response.headers.set('Access-Control-Allow-Origin', '*');
-    response.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    response.headers.set('Access-Control-Allow-Headers', 'Content-Type');
+    return NextResponse.json(result);
+  } catch (error: any) {
+    console.error('❌ PROCESS API: Error:', error);
     
-    return response;
-  } catch (error: unknown) {
-    console.error('❌ PROCESS ENDPOINT: Error:', error);
-    
-    const response = NextResponse.json(
-      { 
-        error: 'Failed to process request',
-        //@ts-expect-error - error typing
-        message: error?.message,
-        //@ts-expect-error - error typing
-        stack: process.env.NODE_ENV === 'development' ? error?.stack : undefined
-      },
-      { status: 500 }
-    );
-    
-    response.headers.set('Access-Control-Allow-Origin', '*');
-    return response;
+    return NextResponse.json({ 
+      error: 'Failed to process request',
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    }, { status: 500 });
   }
 }
 
+// Add OPTIONS handler for CORS
 export async function OPTIONS() {
-  const response = new NextResponse(null, { status: 200 });
-  response.headers.set('Access-Control-Allow-Origin', '*');
-  response.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  response.headers.set('Access-Control-Allow-Headers', 'Content-Type');
-  return response;
+  return new NextResponse(null, {
+    status: 200,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    },
+  });
 }
