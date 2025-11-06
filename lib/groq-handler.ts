@@ -51,17 +51,8 @@ export class GroqHandler {
     // Use userQuery if available, otherwise fall back to query
     const finalQuery = userQuery || query;
 
-    console.log('🔧 GROQ HANDLER: Processing request with full context', {
-      feature: feature,
-      query: finalQuery,
-      hasConversationHistory: conversationHistory?.length > 0,
-      historyLength: conversationHistory?.length,
-      hasPageInfo: !!pageInfo,
-      model: model,
-    });
-
     // Build enhanced prompt with all available context
-    const messages = this.buildEnhancedMessages(
+    const messages : Array<{ role: string; content: string }> = this.buildEnhancedMessages(
       feature,
       finalQuery,
       pageInfo,
@@ -71,6 +62,7 @@ export class GroqHandler {
 
     try {
       const completion = await this.client.chat.completions.create({
+        //@ts-expect-error- typing issues with Groq SDK
         messages: messages,
         model: model || this.defaultModel,
         temperature: this.getTemperatureForFeature(feature),
@@ -295,15 +287,10 @@ export class GroqHandler {
           file: fs.createReadStream(tempFilePath),
           model: options.model || 'whisper-large-v3-turbo',
           prompt: options.prompt || '',
+          //@ts-expect-error- typing issues with Groq SDK
           response_format: options.response_format || 'json',
           language: options.language || 'en',
           temperature: options.temperature || 0.0,
-        });
-
-        console.log('Transcription completed:', {
-          text: transcription.text,
-          duration: transcription.duration,
-          language: transcription.language,
         });
 
         fs.unlinkSync(tempFilePath);
